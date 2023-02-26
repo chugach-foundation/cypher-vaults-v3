@@ -1,0 +1,78 @@
+name: Cargo-audit, lint and test vault program
+
+on:
+  push:
+    branches: master
+  pull_request:
+    branches: master
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: nightly-2022-04-25
+  SOLANA_VERSION: "1.14.11"
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Cache cargo-audit version
+        uses: Swatinem/rust-cache@v1
+      - name: Download cargo-audit
+        uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-audit
+          version: latest
+      - name: Run cargo-audit # Using args from .cargo/audit.toml
+        run: cargo audit
+  lint-test:
+    name: lint & test vault program
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config build-essential libudev-dev
+      - name: Install Rust nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+      - name: Cache build files
+        uses: Swatinem/rust-cache@v1
+
+      - name: Cargo fmt
+        run: cargo fmt -- --check
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- --deny=warnings
+
+      # Install Solana
+      - name: Cache Solana binaries
+        uses: actions/cache@v2
+        with:
+          path: ~/.cache/solana
+          key: ${{ runner.os }}-${{ env.SOLANA_VERSION }}
+      - name: Install Solana
+        run: |
+          sh -c "$(curl -sSfL https://release.solana.com/v${{ env.SOLANA_VERSION }}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+          export PATH="/home/runner/.local/share/solana/install/active_release/bin:$PATH"
+          solana --version
+          echo "Generating keypair..."
+          solana-keygen new -o "$HOME/.config/solana/id.json" --no-passphrase --silent
+
+      - name: Run unit tests
+        run: cargo test --lib
+      - name: Build program
+        run: cargo build-bpf
+      - name: Run bpf tests
+        run: cd programs/cypher-vaults && cargo test
