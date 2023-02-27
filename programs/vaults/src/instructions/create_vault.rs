@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token};
 use cypher_client::{
     cpi::{
         accounts::{CreateAccount, CreateSubAccount},
@@ -9,7 +8,7 @@ use cypher_client::{
     Clearing, CypherAccount, CypherSubAccount,
 };
 
-use crate::state::{CreateVaultArgs, Vault, LP_TOKEN_SEED, VAULT_SEED};
+use crate::state::{CreateVaultArgs, Vault, VAULT_SEED};
 
 #[derive(Accounts)]
 #[instruction(args: CreateVaultArgs)]
@@ -18,27 +17,14 @@ pub struct CreateVault<'info> {
         init,
         seeds = [
             VAULT_SEED,
-            cypher_account.key().as_ref(),
-            cypher_sub_account.key().as_ref(),
+            authority.key().as_ref(),
+            args.id.to_le_bytes().as_ref(),
         ],
         bump,
         payer = payer,
-        space = std::mem::size_of::<Vault>() + 8
+        space = Vault::compute_vault_size(args.token_info_count)
     )]
     pub vault: Box<Account<'info, Vault>>,
-
-    #[account(
-        init,
-        seeds = [
-            LP_TOKEN_SEED,
-            vault.key().as_ref()
-        ],
-        bump,
-        payer = payer,
-        mint::authority = vault.key(),
-        mint::decimals = args.decimals,
-    )]
-    pub lp_token_mint: Box<Account<'info, Mint>>,
 
     pub clearing: AccountLoader<'info, Clearing>,
 
@@ -54,8 +40,6 @@ pub struct CreateVault<'info> {
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
-
-    pub token_program: Program<'info, Token>,
 
     pub cypher_program: Program<'info, Cypher>,
 
@@ -79,8 +63,8 @@ impl<'info> CreateVault<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -105,8 +89,8 @@ impl<'info> CreateVault<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -122,12 +106,7 @@ pub fn handler(ctx: Context<CreateVault>, args: CreateVaultArgs) -> Result<()> {
 
     let vault = &mut ctx.accounts.vault;
 
-    vault.init(
-        ctx.accounts.authority.key(),
-        ctx.accounts.lp_token_mint.key(),
-        *vault_bump,
-        &args,
-    );
+    vault.init(ctx.accounts.authority.key(), *vault_bump, &args);
 
     ctx.accounts.invoke_create_account(args)?;
 

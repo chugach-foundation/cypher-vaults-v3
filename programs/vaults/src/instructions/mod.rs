@@ -1,9 +1,19 @@
+pub mod close_deposits;
 pub mod close_vault;
 pub mod create_vault;
 pub mod deposit;
+pub mod disable_deposits;
+pub mod enable_deposits;
+pub mod open_deposits;
+pub mod set_deposit_limit;
 pub mod withdraw;
 
+pub use close_deposits::*;
 pub use close_vault::*;
 pub use create_vault::*;
 pub use deposit::*;
+pub use disable_deposits::*;
+pub use enable_deposits::*;
+pub use open_deposits::*;
+pub use set_deposit_limit::*;
 pub use withdraw::*;

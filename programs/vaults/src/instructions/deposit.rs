@@ -6,14 +6,14 @@ use cypher_client::{
     CacheAccount, Clearing, CypherAccount, CypherSubAccount, Pool, PoolNode,
 };
 
-use crate::state::{Vault, VAULT_SEED};
+use crate::{
+    error::ErrorCode,
+    state::{Vault, VAULT_SEED},
+};
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
-    #[account(
-        mut,
-        has_one = lp_mint
-    )]
+    #[account(mut)]
     pub vault: Box<Account<'info, Vault>>,
 
     pub lp_mint: Box<Account<'info, Mint>>,
@@ -21,7 +21,7 @@ pub struct Deposit<'info> {
     #[account(
         init_if_needed,
         token::mint = lp_mint,
-        token::authority = payer,
+        token::authority = authority,
         payer = payer,
     )]
     pub lp_token_account: Box<Account<'info, TokenAccount>>,
@@ -45,10 +45,16 @@ pub struct Deposit<'info> {
     #[account(mut)]
     pub token_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        token::mint = token_mint,
+        token::authority = authority,
+    )]
     pub source_token_account: Box<Account<'info, TokenAccount>>,
 
     pub token_mint: Box<Account<'info, Mint>>,
+
+    pub authority: Signer<'info>,
 
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -61,6 +67,14 @@ pub struct Deposit<'info> {
 }
 
 impl<'info> Deposit<'info> {
+    /// We need to validate that we have the correct SPL Token.
+    pub fn validate(&self) -> Result<()> {
+        self.vault
+            .get_token_info(self.token_mint.key())
+            .ok_or(ErrorCode::InvalidTokenMint)?;
+        Ok(())
+    }
+
     /// Deposit the input amount to the [`cypher_client::CypherAccount`].
     pub fn invoke_deposit_funds(&self, amount: u64) -> Result<()> {
         let cpi_program = self.cypher_program.to_account_info();
@@ -83,8 +97,8 @@ impl<'info> Deposit<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -105,8 +119,8 @@ impl<'info> Deposit<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -118,19 +132,30 @@ impl<'info> Deposit<'info> {
 /// The user wants to deposit a token amount represented by `deposit_amount`,
 /// taking this number we need to calculate how many tokens we are going to mint for the user.
 pub fn handler(ctx: Context<Deposit>, deposit_amount: u64) -> Result<()> {
+    ctx.accounts.validate()?;
+
     // perform the deposit into the [`Vault`]'s [`CypherAccount`]
     ctx.accounts.invoke_deposit_funds(deposit_amount)?;
 
-    // todo: let's add this logic later
-    let mint_amount = 0;
+    let mint_amount: u64 = ctx
+        .accounts
+        .vault
+        .get_token_info(ctx.accounts.token_mint.key())
+        .unwrap()
+        .calculate_mint_amount(deposit_amount as u128)
+        .try_into()
+        .unwrap();
 
     // mint the appropriate amount of LP tokens to the end user
     ctx.accounts.invoke_mint_to(mint_amount)?;
 
     let vault = &mut ctx.accounts.vault;
+    let token_info = vault
+        .get_token_info_mut(ctx.accounts.token_mint.key())
+        .unwrap();
 
-    vault.deposits += deposit_amount;
-    vault.token_supply += mint_amount;
+    token_info.deposits += deposit_amount;
+    token_info.token_supply += mint_amount;
 
     Ok(())
 }

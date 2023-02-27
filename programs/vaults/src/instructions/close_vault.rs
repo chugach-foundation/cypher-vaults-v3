@@ -1,24 +1,15 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::Mint;
 
-use crate::state::Vault;
+use crate::{check, state::Vault};
 
 #[derive(Accounts)]
 pub struct CloseVault<'info> {
     #[account(
         mut,
         has_one = authority,
-        has_one = lp_mint,
         close = rent_destination
     )]
     pub vault: Box<Account<'info, Vault>>,
-
-    #[account(
-        mut,
-        mint::authority = authority,
-        close = rent_destination,
-    )]
-    pub lp_mint: Box<Account<'info, Mint>>,
 
     pub authority: Signer<'info>,
 
@@ -31,10 +22,12 @@ pub struct CloseVault<'info> {
 impl<'info> CloseVault<'info> {
     /// Validate that this [`Vault`] does not have outstanding deposits and LP tokens.
     pub fn validate(&self) -> Result<()> {
-        // check that the deposits on the vault are zeroed
-
-        // and the the supply of the LP token is also zero
-
+        for token_info in self.vault.token_infos.iter() {
+            // check that the deposits for this SPL Token are zeroed
+            check!(token_info.deposits == 0, TokenWithDeposits);
+            // and the the supply of the corresponding LP token is also zero
+            check!(token_info.token_supply == 0, TokenWithLpSupply);
+        }
         Ok(())
     }
 }

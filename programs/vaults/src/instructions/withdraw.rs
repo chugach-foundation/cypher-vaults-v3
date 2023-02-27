@@ -6,21 +6,21 @@ use cypher_client::{
     CacheAccount, Clearing, CypherAccount, CypherSubAccount, Pool, PoolNode,
 };
 
-use crate::state::{Vault, VAULT_SEED};
+use crate::{
+    error::ErrorCode,
+    state::{Vault, VAULT_SEED},
+};
 
 #[derive(Accounts)]
 pub struct Withdraw<'info> {
-    #[account(
-        mut,
-        has_one = lp_mint
-    )]
+    #[account(mut)]
     pub vault: Box<Account<'info, Vault>>,
 
     pub lp_mint: Box<Account<'info, Mint>>,
 
     #[account(
         token::mint = lp_mint,
-        token::authority = payer,
+        token::authority = authority,
     )]
     pub lp_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -43,7 +43,11 @@ pub struct Withdraw<'info> {
     #[account(mut)]
     pub token_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        token::mint = token_mint,
+        token::authority = authority,
+    )]
     pub destination_token_account: Box<Account<'info, TokenAccount>>,
 
     pub token_mint: Box<Account<'info, Mint>>,
@@ -51,8 +55,7 @@ pub struct Withdraw<'info> {
     /// CHECK: Checked via CPI to [`Cypher`].
     pub vault_signer: AccountInfo<'info>,
 
-    #[account(mut)]
-    pub payer: Signer<'info>,
+    pub authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
 
@@ -60,6 +63,14 @@ pub struct Withdraw<'info> {
 }
 
 impl<'info> Withdraw<'info> {
+    /// We need to validate that we have the correct SPL Token.
+    pub fn validate(&self) -> Result<()> {
+        self.vault
+            .get_token_info(self.token_mint.key())
+            .ok_or(ErrorCode::InvalidTokenMint)?;
+        Ok(())
+    }
+
     /// Withdraw the input amount from the [`cypher_client::CypherAccount`].
     pub fn invoke_withdraw_funds(&self, amount: u64) -> Result<()> {
         let cpi_program = self.cypher_program.to_account_info();
@@ -83,8 +94,8 @@ impl<'info> Withdraw<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -106,8 +117,8 @@ impl<'info> Withdraw<'info> {
                 cpi_accounts,
                 &[&[
                     VAULT_SEED,
-                    self.cypher_account.key().as_ref(),
-                    self.cypher_sub_account.key().as_ref(),
+                    self.vault.authority.as_ref(),
+                    self.vault.id.to_le_bytes().as_ref(),
                     &[self.vault.bump],
                 ]],
             ),
@@ -119,20 +130,31 @@ impl<'info> Withdraw<'info> {
 /// The user wants to withdraw a token amount represented by `withdraw_amount`,
 /// taking this number we need to calculate how many tokens we are going to burn for the user.
 pub fn handler(ctx: Context<Withdraw>, withdraw_amount: u64) -> Result<()> {
-    // todo: let's add this logic later
-    let burn_amount = 0;
+    ctx.accounts.validate()?;
+
+    let burn_amount: u64 = ctx
+        .accounts
+        .vault
+        .get_token_info(ctx.accounts.token_mint.key())
+        .unwrap()
+        .calculate_burn_amount(withdraw_amount as u128)
+        .try_into()
+        .unwrap();
 
     // burn the corresponding amount
-    ctx.accounts.invoke_burn(burn_amount)?;
+    ctx.accounts.invoke_burn(burn_amount as u64)?;
 
     // finally withdraw from the [`Vault`]'s [`CypherAccount`]
     ctx.accounts.invoke_withdraw_funds(withdraw_amount)?;
 
     let vault = &mut ctx.accounts.vault;
+    let token_info = vault
+        .get_token_info_mut(ctx.accounts.token_mint.key())
+        .unwrap();
 
     // update the [`Vault`]'s data
-    vault.token_supply = vault.token_supply.checked_sub(burn_amount).unwrap();
-    vault.deposits = vault.deposits.checked_sub(withdraw_amount).unwrap();
+    token_info.token_supply = token_info.token_supply.checked_sub(burn_amount).unwrap();
+    token_info.deposits = token_info.deposits.checked_sub(withdraw_amount).unwrap();
 
     Ok(())
 }
