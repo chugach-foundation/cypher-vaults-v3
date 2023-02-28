@@ -6,6 +6,7 @@
         "editor.formatOnSave": true
     },
     "rust-analyzer.linkedProjects": [
+        "cli/Cargo.toml",
         "crates/program-utils/Cargo.toml",
         "programs/vaults/Cargo.toml",
     ],

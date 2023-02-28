@@ -1,81 +1,58 @@
-use anchor_lang::{AccountDeserialize, AnchorSerialize, ToAccountMetas};
-use anchor_spl::{associated_token, token::spl_token};
+use anchor_lang::{AccountDeserialize, AnchorSerialize, Owner, ToAccountMetas, ZeroCopy};
+use anchor_spl::token::spl_token;
+use anchor_spl::{associated_token, token::spl_token::native_mint};
+use arrayref::array_ref;
 use bincode::deserialize;
-use bytemuck::from_bytes;
-
+use bytemuck::Pod;
+use bytemuck::{bytes_of, from_bytes};
+use cypher_client::utils::derive_public_clearing_address;
+use cypher_client::{quote_mint, Cache, ClearingConfig};
+use cypher_client::{CacheAccount, ClearingType};
+use cypher_client::{Clearing, FeeTier};
+use fixed::types::I80F48;
 use solana_program::{
     account_info::AccountInfo,
     clock::{Clock, UnixTimestamp},
     program_option::COption,
     program_pack::Pack,
-    pubkey::*,
-    rent::*,
+    pubkey::Pubkey,
+    rent::Rent,
     sysvar,
 };
 use solana_program_test::*;
+use solana_sdk::account::Account;
+use solana_sdk::system_program;
 use solana_sdk::{
     account::{AccountSharedData, WritableAccount},
-    instruction::Instruction,
+    instruction::{Instruction, InstructionError},
     signature::{Keypair, Signer},
     system_instruction,
     transaction::Transaction,
 };
-use spl_token::{state::*, *};
-
-use bytemuck::Pod;
-
-trait AddPacked {
-    fn add_packable_account<T: Pack>(
-        &mut self,
-        pubkey: Pubkey,
-        amount: u64,
-        data: &T,
-        owner: &Pubkey,
-    );
-}
-
-impl AddPacked for ProgramTest {
-    fn add_packable_account<T: Pack>(
-        &mut self,
-        pubkey: Pubkey,
-        amount: u64,
-        data: &T,
-        owner: &Pubkey,
-    ) {
-        let mut account = solana_sdk::account::Account::new(amount, T::get_packed_len(), owner);
-        data.pack_into_slice(&mut account.data);
-        self.add_account(pubkey, account);
-    }
-}
+use spl_token::state::*;
 
 #[derive(Default)]
-pub struct VaultProgramTestConfig {
+pub struct ProgramTestContextConfig {
     pub mint_decimals: Vec<u8>,
 }
 
-pub struct VaultProgramTest {
-    pub context: ProgramTestContext,
+pub struct ProgramTestContext {
+    pub context: solana_program_test::ProgramTestContext,
     pub rent: Rent,
 
     pub mint_auth: Keypair,
     pub mint_list: Vec<Pubkey>,
+
+    pub clearing_auth: Keypair,
+    pub clearing: Pubkey,
+    pub cache: Pubkey,
 }
 
-impl VaultProgramTest {
+impl ProgramTestContext {
     #[allow(dead_code)]
-    pub async fn start_new(config: &VaultProgramTestConfig) -> Self {
-        let test = ProgramTest::new("lending", lending::id(), processor!(lending::entry));
+    pub async fn start_new(config: &ProgramTestContextConfig) -> Self {
+        let mut test = ProgramTest::default();
 
-        //test.set_compute_max_units(1_400_000);
-
-        VaultProgramTest::start_new_with_program_test(test, config).await
-    }
-
-    #[allow(dead_code)]
-    pub async fn start_new_with_program_test(
-        mut test: ProgramTest,
-        config: &VaultProgramTestConfig,
-    ) -> Self {
         solana_logger::setup_with_default(
             "solana_rbpf::vm=info,\
               solana_runtime::message_processor=trace,
@@ -85,60 +62,115 @@ impl VaultProgramTest {
 
         test.add_program("cypher", cypher_client::id(), None);
 
-        let mint_auth = Keypair::new();
+        let mut context = test.start_with_context().await;
+        let rent = context.banks_client.get_rent().await.unwrap();
 
-        let mut mint_list = vec![];
+        let clearing = derive_public_clearing_address();
+
+        let mut ptc = ProgramTestContext {
+            context,
+            rent,
+            mint_auth: Keypair::new(),
+            mint_list: Vec::new(),
+            clearing_auth: Keypair::new(),
+            clearing: clearing.0,
+            cache: Pubkey::default(),
+        };
 
         // add native mint
-        test.add_packable_account(
-            native_mint::id(),
+        ptc.add_packable_account(
+            &native_mint::id(),
             u32::MAX as u64,
             &Mint {
                 is_initialized: true,
-                mint_authority: COption::Some(mint_auth.pubkey()),
+                mint_authority: COption::Some(ptc.mint_auth.pubkey()),
                 decimals: 9,
                 ..Mint::default()
             },
             &spl_token::id(),
         );
 
+        // add usdc mint
+        ptc.add_packable_account(
+            &quote_mint::id(),
+            u32::MAX as u64,
+            &Mint {
+                is_initialized: true,
+                mint_authority: COption::Some(ptc.mint_auth.pubkey()),
+                decimals: 6,
+                ..Mint::default()
+            },
+            &spl_token::id(),
+        );
+
         // add mints
-        for i in config.mint_decimals {
+        for i in &config.mint_decimals {
             let mint_kp = Keypair::new();
-            test.add_packable_account(
-                mint_kp.pubkey(),
+            ptc.add_packable_account(
+                &mint_kp.pubkey(),
                 u32::MAX as u64,
                 &Mint {
                     is_initialized: true,
-                    mint_authority: COption::Some(mint_auth.pubkey()),
-                    decimals: i,
+                    mint_authority: COption::Some(ptc.mint_auth.pubkey()),
+                    decimals: *i,
                     ..Mint::default()
                 },
                 &spl_token::id(),
             );
-            mint_list.push(mint_kp.pubkey());
+            ptc.mint_list.push(mint_kp.pubkey());
         }
 
-        test.add_account(
-            mint_auth.pubkey(),
-            solana_sdk::account::Account::new(
-                u32::MAX as u64,
-                0,
-                &solana_sdk::system_program::id(),
-            ),
+        ptc.add_account(&ptc.mint_auth.pubkey());
+        ptc.add_zero_copy_account(
+            &clearing.0,
+            Box::new(Clearing {
+                bump_seed: [clearing.1],
+                clearing_type: ClearingType::Public,
+                authority: ptc.clearing_auth.pubkey(),
+                fee_mint: Pubkey::default(),
+                fee_tiers: [FeeTier::default(); 10],
+                config: ClearingConfig {
+                    maint_margin: 110,
+                    init_margin: 120,
+                    target_margin: 120,
+                    liq_liqor_fee: 5,
+                    liq_insurance_fee: 5,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            &cypher_client::id(),
         );
 
-        let lending_id = lending::id();
+        let mut caches = [Cache::default(); 512];
+        caches[0] = Cache {
+            oracle_products: Pubkey::new_unique(),
+            oracle_price: I80F48::ONE.to_bits(),
+            market_price: I80F48::ZERO.to_bits(),
+            updated_at: u64::default(),
+            deposit_index: I80F48::ONE.to_bits(),
+            borrow_index: I80F48::ONE.to_bits(),
+            spot_init_asset_weight: 100,
+            spot_maint_asset_weight: 100,
+            spot_init_liab_weight: 100,
+            spot_maint_liab_weight: 100,
+            decimals: 6,
+            ..Default::default()
+        };
 
-        let mut context = test.start_with_context().await;
-        let rent = context.banks_client.get_rent().await.unwrap();
+        let cache = Pubkey::new_unique();
 
-        VaultProgramTest {
-            context,
-            rent,
-            mint_auth,
-            mint_list,
-        }
+        ptc.add_zero_copy_account(
+            &cache,
+            Box::new(CacheAccount {
+                authority: ptc.clearing_auth.pubkey(),
+                caches,
+            }),
+            &cypher_client::id(),
+        );
+        ptc.cache = cache;
+
+        ptc
     }
 
     #[allow(dead_code)]
@@ -168,13 +200,60 @@ impl VaultProgramTest {
     }
 
     #[allow(dead_code)]
-    pub async fn get_account(&mut self, address: Pubkey) -> solana_sdk::account::Account {
+    pub async fn get_account(&mut self, address: Pubkey) -> Account {
         self.context
             .banks_client
             .get_account(address)
             .await
             .unwrap()
             .unwrap()
+    }
+
+    #[allow(dead_code)]
+    pub fn add_account(&mut self, pubkey: &Pubkey) {
+        let account = Account::new(u64::MAX, 0, &system_program::id());
+        self.context.set_account(pubkey, &account.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn add_packable_account<T: Pack>(
+        &mut self,
+        pubkey: &Pubkey,
+        lamports: u64,
+        data: &T,
+        owner: &Pubkey,
+    ) {
+        let mut account = Account::new(lamports, T::get_packed_len(), owner);
+        data.pack_into_slice(&mut account.data);
+        self.context.set_account(pubkey, &account.into());
+    }
+
+    #[allow(dead_code)]
+    pub fn add_zero_copy_account<T: ZeroCopy + Owner>(
+        &mut self,
+        pubkey: &Pubkey,
+        data: Box<T>,
+        owner: &Pubkey,
+    ) {
+        let mut account = Account::new(u32::MAX as u64, std::mem::size_of::<T>() + 8, owner);
+        account.data.extend_from_slice(&T::discriminator());
+        account.data.extend_from_slice(bytes_of(data.as_ref()));
+        self.context.set_account(pubkey, &account.into());
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_zero_copy_account<T: ZeroCopy + Owner>(&mut self, address: Pubkey) -> Box<T> {
+        let account = self
+            .context
+            .banks_client
+            .get_account(address)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = &account.data.as_slice();
+        let disc_bytes = array_ref![data, 0, 8];
+        assert_eq!(disc_bytes, &T::discriminator());
+        Box::new(*from_bytes::<T>(&data[8..std::mem::size_of::<T>() + 8]))
     }
 
     #[allow(dead_code)]
@@ -203,7 +282,7 @@ impl VaultProgramTest {
     pub async fn load_account_result(
         &mut self,
         acc_pk: Pubkey,
-    ) -> Result<Option<solana_sdk::account::Account>, BanksClientError> {
+    ) -> Result<Option<Account>, BanksClientError> {
         self.context.banks_client.get_account(acc_pk).await
     }
 

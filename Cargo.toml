@@ -1,7 +1,8 @@
 [workspace]
 members = [
+    "cli/",
     "crates/*",
-    "programs/*"   
+    "programs/*"
 ]
 
 [profile.release]

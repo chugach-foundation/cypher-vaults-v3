@@ -896,6 +896,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+
+[[package]]
 name = "combine"
 version = "3.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1691,6 +1695,32 @@ dependencies = [
  "log",
  "plain",
  "scroll",
+]
+
+[[package]]
+name = "grid"
+version = "0.1.0"
+dependencies = [
+ "anchor-client",
+ "anchor-lang",
+ "anchor-spl",
+ "arrayref",
+ "async-trait",
+ "bincode",
+ "borsh",
+ "bytemuck",
+ "cypher-client",
+ "jet-proto-proc-macros",
+ "num-traits",
+ "program-utils",
+ "serde",
+ "solana-logger",
+ "solana-program",
+ "solana-program-test",
+ "solana-sdk",
+ "static_assertions",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -5129,6 +5159,7 @@ dependencies = [
  "borsh",
  "bytemuck",
  "cypher-client",
+ "fixed",
  "jet-proto-proc-macros",
  "num-traits",
  "program-utils",
